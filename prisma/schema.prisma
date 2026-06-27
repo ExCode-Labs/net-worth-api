@@ -1,0 +1,239 @@
+// NetWorth backend schema.
+// A User is identified by email+password (signed-in), Google OAuth, or device
+// guestKey (guest). All financial data is normalized per-entity and owned by a
+// User. Ids are supplied by the client so optimistic inserts use the same id
+// end-to-end.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URI")
+}
+
+model User {
+  id       String  @id @default(cuid())
+  clerkId  String? @unique // legacy — no longer populated for new users
+  guestKey String? @unique // guests (device key)
+  googleId String? @unique // Google sub from ID token
+
+  // Profile
+  email        String?
+  passwordHash String? // bcrypt hash; null for Google / guest users
+  firstName    String?
+  lastName     String?
+  fullName     String?
+  avatarUrl    String?
+  provider     String  @default("guest") // "google" | "email" | "guest"
+
+  // Phone — mandatory for sharing; phoneHash is the discovery key (SHA-256 of
+  // the normalized number) so contacts can be matched without exposing numbers.
+  phone     String?
+  phoneHash String? @unique
+
+  // App state
+  currency  String  @default("INR")
+  guestName String?
+  onboarded Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  accounts     Account[]
+  cards        Card[]
+  assets       Asset[]
+  liabilities  Liability[]
+  transactions Transaction[]
+
+  sharesOwned    Share[] @relation("ShareOwner")
+  sharesReceived Share[] @relation("ShareRecipient")
+  sessions       Session[]
+}
+
+// Authenticated session — created on login, rotated on each token refresh.
+// Enables per-device revocation and login-notification emails.
+model Session {
+  id               String   @id @default(cuid())
+  userId           String
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refreshTokenHash String   @unique // SHA-256(rawRefreshToken) — never stores plaintext
+  ipAddress        String?
+  userAgent        String?
+  device           String?  // parsed: "Chrome on Windows"
+  expiresAt        DateTime
+  lastUsedAt       DateTime @default(now())
+  createdAt        DateTime @default(now())
+
+  @@index([userId])
+}
+
+// Temporary OTP codes for email 2FA — auto-expired on read or after expiresAt.
+model OtpCode {
+  id        String   @id @default(cuid())
+  email     String
+  hash      String   // bcrypt hash of the 6-digit code
+  purpose   String   @default("login") // "login" | "reset" — prevents cross-flow OTP reuse
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([email])
+}
+
+model Account {
+  id            String   @id
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type          String
+  bank          String // display name + fuzzy-match fallback (free text / custom allowed)
+  bankCode      String? // FK to Bank.code when the bank is a listed one (null for custom)
+  bankRef       Bank?    @relation(fields: [bankCode], references: [code])
+  nickname      String
+  balance       Float    @default(0)
+  accountName   String?
+  accountNumber String?
+  ifsc          String?
+  branch        String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([userId])
+  @@index([bankCode])
+}
+
+model Card {
+  id         String   @id
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cardName   String
+  bank       String // display name + fuzzy-match fallback (free text / custom allowed)
+  bankCode   String? // FK to Bank.code when the bank is a listed one (null for custom)
+  bankRef    Bank?    @relation(fields: [bankCode], references: [code])
+  billCycle  String   @default("")
+  number     String? // full PAN (vault) — never the CVV
+  cardHolder String?
+  network    String?
+  last4      String   @default("")
+  expiry     String   @default("")
+  limit      Float    @default(0)
+  usage      Float    @default(0)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([userId])
+  @@index([bankCode])
+}
+
+model Asset {
+  id           String    @id
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type         String
+  name         String
+  value        Float     @default(0)
+  details      Json? // type-specific inputs (grams/rate, FD principal/tenure, lent ledger links, etc.)
+  closed       Boolean   @default(false) // archived (sold/matured/returned) — kept as history, out of totals
+  startDate    DateTime? // when acquired / invested
+  periodMonths Int? // holding period / lock-in / tenure, in months
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([userId])
+}
+
+model Liability {
+  id           String    @id
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type         String
+  name         String
+  lender       String    @default("")
+  phone        String    @default("") // lender's mobile (when the lender is a person)
+  balance      Float     @default(0)
+  emi          Float     @default(0)
+  details      Json? // borrow ledger links (which account received/repaid + linked txns)
+  closed       Boolean   @default(false) // repaid/settled — kept as history, out of totals
+  startDate    DateTime? // when the loan/EMI/borrow started
+  periodMonths Int? // tenure in months
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([userId])
+}
+
+model Transaction {
+  id         String   @id
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type       String
+  amount     Float
+  category   String   @default("")
+  merchant   String   @default("")
+  account    String   @default("")
+  bank       String   @default("")
+  date       DateTime
+  note       String   @default("")
+  source     String   @default("manual")
+  status     String   @default("confirmed")
+  rawText    String?
+  confidence String   @default("high")
+  createdAt  DateTime @default(now())
+
+  @@index([userId])
+}
+
+// Reference data — the canonical list of Indian banks used by the account form's
+// searchable picker and for IFSC/account-number validation. Seeded from code on
+// boot (BanksService.onModuleInit) and served read-only via GET /banks.
+model Bank {
+  // `id` is the primary key (Prisma-generated cuid). `code` (the 4-letter IFSC
+  // prefix) is the stable, offline-known natural key the client ships and every
+  // FK links on, so it's kept @unique.
+  id          String   @id @default(cuid())
+  name        String   @unique
+  code        String   @unique // 4-letter IFSC prefix, e.g. "HDFC"
+  ifscLength  Int      @default(11)
+  acctMin     Int      @default(9) // min account-number digits
+  acctMax     Int      @default(18) // max account-number digits
+  acctExample String? // representative account number
+  category    String   @default("") // public | private | sfb | payments | foreign | coop
+  updatedAt   DateTime @updatedAt
+
+  accounts     Account[]
+  cards        Card[]
+  cardProducts CardProduct[]
+}
+
+// Reference data — popular card products. Seeded from code on boot
+// (CardProductsService.onModuleInit) and served read-only via GET /card-products.
+// Powers the Add Card form's typeable dropdown (selecting one prefills bank +
+// network).
+model CardProduct {
+  id        String   @id // slug, e.g. "hdfc-bank-millennia-credit-card"
+  name      String
+  issuer    String   @default("") // display label, e.g. "SBI Card" (may not be a bank name)
+  bankCode  String? // FK to Bank.code resolved from the issuer (null if none)
+  bankRef   Bank?    @relation(fields: [bankCode], references: [code])
+  network   String   @default("") // Visa | Mastercard | RuPay | Amex | Diners Club
+  type      String   @default("") // Cashback | Travel | Premium | …
+  updatedAt DateTime @updatedAt
+
+  @@index([bankCode])
+}
+
+// A grant from `owner` letting `recipient` view selected categories of the
+// owner's finances, live. `categories` ⊆ balance|cards|assets|liabilities.
+model Share {
+  id          String   @id @default(cuid())
+  ownerId     String
+  owner       User     @relation("ShareOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  recipientId String
+  recipient   User     @relation("ShareRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  categories  String[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([ownerId, recipientId])
+  @@index([recipientId])
+}
