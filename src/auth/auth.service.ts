@@ -347,12 +347,15 @@ export class AuthService {
     }
 
     const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+    const name = firstName.trim();
+    const parts = name.split(/\s+/);
     await this.prisma.user.create({
       data: {
         email: normalised,
         passwordHash,
-        firstName: firstName.trim() || null,
-        fullName: firstName.trim() || null,
+        firstName: parts[0] || null,
+        lastName: parts.slice(1).join(' ') || null,
+        fullName: name || null,
         provider: 'email',
       },
     });
