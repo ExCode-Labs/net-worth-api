@@ -1,5 +1,6 @@
 import {
   Injectable,
+  Logger,
   UnauthorizedException,
   BadRequestException,
   ConflictException,
@@ -46,6 +47,8 @@ export interface SessionInfo {
 
 @Injectable()
 export class AuthService {
+  private readonly log = new Logger(AuthService.name);
+
   private readonly googleClient = new OAuth2Client(
     process.env.GOOGLE_CLIENT_ID,
   );
@@ -558,18 +561,29 @@ export class AuthService {
       data: { email, hash, purpose, expiresAt },
     });
 
+    // Send the email without blocking the response. The first SMTP handshake to
+    // Gmail can take several seconds (often combined with a cold DB), which made
+    // the very first signup/login request time out on the client. The OTP row is
+    // already persisted above, so it's safe to fire-and-forget; the client shows
+    // "code sent" immediately and can use "Resend" if delivery ever fails.
     const isReset = purpose === 'reset';
-    await this.mailer.sendMail({
-      from: `"NetWorth" <${process.env.SMTP_USER}>`,
-      to: email,
-      subject: isReset
-        ? `Reset your NetWorth password: ${code}`
-        : `Your NetWorth verification code: ${code}`,
-      text: isReset
-        ? `Your password reset code is ${code}. It expires in 10 minutes. If you did not request this, ignore this email.`
-        : `Your verification code is ${code}. It expires in 10 minutes.`,
-      html: otpEmailHtml(code, isReset),
-    });
+    void this.mailer
+      .sendMail({
+        from: `"NetWorth" <${process.env.SMTP_USER}>`,
+        to: email,
+        subject: isReset
+          ? `Reset your NetWorth password: ${code}`
+          : `Your NetWorth verification code: ${code}`,
+        text: isReset
+          ? `Your password reset code is ${code}. It expires in 10 minutes. If you did not request this, ignore this email.`
+          : `Your verification code is ${code}. It expires in 10 minutes.`,
+        html: otpEmailHtml(code, isReset),
+      })
+      .catch((e: unknown) => {
+        this.log.warn(
+          `Failed to send OTP email to ${email}: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      });
   }
 
   private sendLoginNotificationEmail(
