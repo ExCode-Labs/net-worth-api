@@ -1,11 +1,22 @@
 import { NestFactory } from '@nestjs/core';
 import { Logger, ValidationPipe } from '@nestjs/common';
-import type { NestExpressApplication } from '@nestjs/platform-express';
+import {
+  ExpressAdapter,
+  type NestExpressApplication,
+} from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import express, { type Express } from 'express';
 import { AppModule } from './app.module';
 
-async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+// Vercel imports this module and uses the default export (an Express app) as the
+// serverless handler. Locally we still call listen().
+const server = express();
+
+async function bootstrap(expressInstance: Express) {
+  const app = await NestFactory.create<NestExpressApplication>(
+    AppModule,
+    new ExpressAdapter(expressInstance),
+  );
   app.set('trust proxy', 1);
   app.enableCors({ origin: true });
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
@@ -38,9 +49,21 @@ async function bootstrap() {
     swaggerOptions: { persistAuthorization: true },
   });
 
-  const port = process.env.PORT ?? 3000;
-  await app.listen(port);
-  Logger.log(`Listening on http://localhost:${port}`, 'Bootstrap');
-  Logger.log(`Swagger UI at http://localhost:${port}/docs`, 'Bootstrap');
+  return app;
 }
-void bootstrap();
+
+if (process.env.VERCEL) {
+  // Serverless: just wire up routes onto `server`, no listen.
+  // ponytail: known cold-start race — a request landing before init() resolves
+  // 404s. Wrap with @codegenie/serverless-express (already a dep) if it bites.
+  void bootstrap(server).then((app) => app.init());
+} else {
+  void bootstrap(server).then(async (app) => {
+    const port = process.env.PORT ?? 3000;
+    await app.listen(port);
+    Logger.log(`Listening on http://localhost:${port}`, 'Bootstrap');
+    Logger.log(`Swagger UI at http://localhost:${port}/docs`, 'Bootstrap');
+  });
+}
+
+export default server;
