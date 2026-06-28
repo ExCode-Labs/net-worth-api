@@ -41,6 +41,7 @@ export interface SessionInfo {
   ipAddress: string | null;
   createdAt: Date;
   lastUsedAt: Date;
+  current: boolean;
 }
 
 @Injectable()
@@ -160,6 +161,8 @@ export class AuthService {
     if (authHeader?.startsWith('Bearer ')) {
       const payload = this.verifyAccessToken(authHeader.slice(7));
       if (payload) {
+        // Expose the session id so logout can revoke just this device.
+        (req as Request & { sessionId?: string }).sessionId = payload.jti;
         // ── Redis hot path ─────────────────────────────────────────────────────
         const cachedUserId = await this.redis.getSession(payload.jti);
         if (cachedUserId && cachedUserId === payload.sub) {
@@ -270,7 +273,10 @@ export class AuthService {
 
   // ── Session management ────────────────────────────────────────────────────────
 
-  async getSessions(userId: string): Promise<SessionInfo[]> {
+  async getSessions(
+    userId: string,
+    currentSessionId?: string,
+  ): Promise<SessionInfo[]> {
     const sessions = await this.prisma.session.findMany({
       where: { userId, expiresAt: { gt: new Date() } },
       orderBy: { lastUsedAt: 'desc' },
@@ -281,6 +287,7 @@ export class AuthService {
       ipAddress: s.ipAddress,
       createdAt: s.createdAt,
       lastUsedAt: s.lastUsedAt,
+      current: s.id === currentSessionId,
     }));
   }
 

@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
 import type { User } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { RedisService } from '../redis/redis.service';
 import { hashPhone } from '../common/phone';
 
 /**
@@ -139,7 +140,10 @@ const RESOURCES: Record<string, ResourceSpec> = {
 
 @Injectable()
 export class DataService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly redis: RedisService,
+  ) {}
 
   private spec(resource: string): ResourceSpec {
     const s = RESOURCES[resource];
@@ -248,12 +252,20 @@ export class DataService {
       currency?: string;
       guestName?: string;
       phone?: string;
+      firstName?: string;
+      lastName?: string;
+      fullName?: string;
+      avatarUrl?: string;
     },
   ) {
     const data: Record<string, unknown> = {};
     if (typeof patch.onboarded === 'boolean') data.onboarded = patch.onboarded;
     if (typeof patch.currency === 'string') data.currency = patch.currency;
     if (typeof patch.guestName === 'string') data.guestName = patch.guestName;
+    if (typeof patch.firstName === 'string') data.firstName = patch.firstName;
+    if (typeof patch.lastName === 'string') data.lastName = patch.lastName;
+    if (typeof patch.fullName === 'string') data.fullName = patch.fullName;
+    if (typeof patch.avatarUrl === 'string') data.avatarUrl = patch.avatarUrl;
 
     let phoneHash: string | undefined;
     if (typeof patch.phone === 'string') {
@@ -275,6 +287,9 @@ export class DataService {
       }
       return tx.user.update({ where: { id: userId }, data });
     });
+    // Evict the cached user so the updated profile is served immediately
+    // (resolve() caches the User for ~5 min).
+    void this.redis.delUser(userId);
     return this.me(user);
   }
 }

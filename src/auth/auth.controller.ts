@@ -199,7 +199,7 @@ export class AuthController {
   @Get('sessions')
   @UseGuards(IdentityGuard)
   async getSessions(@Req() req: AuthedRequest) {
-    return this.auth.getSessions(req.user.id);
+    return this.auth.getSessions(req.user.id, req.sessionId);
   }
 
   @Delete('sessions/:id')
@@ -209,10 +209,21 @@ export class AuthController {
     await this.auth.revokeSession(id, req.user.id);
   }
 
+  /** Sign out the current device only (revokes this session). */
   @Post('logout')
   @UseGuards(IdentityGuard)
   @HttpCode(HttpStatus.NO_CONTENT)
   async logout(@Req() req: AuthedRequest) {
+    if (req.sessionId)
+      await this.auth.revokeSession(req.sessionId, req.user.id);
+    else await this.auth.revokeAllSessions(req.user.id);
+  }
+
+  /** Sign out everywhere (revokes all sessions for the user). */
+  @Post('logout-all')
+  @UseGuards(IdentityGuard)
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async logoutAll(@Req() req: AuthedRequest) {
     await this.auth.revokeAllSessions(req.user.id);
   }
 }

@@ -5,6 +5,8 @@ import { AuthService } from './auth.service';
 
 export interface AuthedRequest extends Request {
   user: User;
+  /** Session id of the access token, set by AuthService.resolve. */
+  sessionId?: string;
 }
 
 /** Resolves the caller's User and attaches it to `req.user`. */

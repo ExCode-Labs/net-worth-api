@@ -7,6 +7,6 @@ import { RedisService } from '../redis/redis.service';
 @Module({
   controllers: [AuthController],
   providers: [AuthService, IdentityGuard, RedisService],
-  exports: [AuthService, IdentityGuard],
+  exports: [AuthService, IdentityGuard, RedisService],
 })
 export class AuthModule {}
