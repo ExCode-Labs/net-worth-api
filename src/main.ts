@@ -43,4 +43,7 @@ async function bootstrap() {
   Logger.log(`Listening on http://localhost:${port}`, 'Bootstrap');
   Logger.log(`Swagger UI at http://localhost:${port}/docs`, 'Bootstrap');
 }
-void bootstrap();
+
+if (process.env.VERCEL !== '1') {
+  void bootstrap();
+}
