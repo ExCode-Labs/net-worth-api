@@ -13,6 +13,7 @@ import { OAuth2Client, type TokenPayload } from 'google-auth-library';
 import type { Request } from 'express';
 import type { User } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
+import { RedisService } from '../redis/redis.service';
 
 const OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const BCRYPT_ROUNDS = 10;
@@ -55,7 +56,10 @@ export class AuthService {
     auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
   });
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly redis: RedisService,
+  ) {}
 
   // ── Token helpers ─────────────────────────────────────────────────────────────
 
@@ -95,7 +99,7 @@ export class AuthService {
     return { raw, hash };
   }
 
-  /** Create a Session row and return both tokens. Sends a login email if user has one. */
+  /** Create a Session row, cache it in Redis, return both tokens. */
   private async issueTokenPair(
     userId: string,
     ip: string | null,
@@ -116,6 +120,13 @@ export class AuthService {
         expiresAt,
       },
     });
+
+    // Cache session in Redis so resolve() avoids a DB hit on every request.
+    void this.redis.setSession(
+      session.id,
+      userId,
+      REFRESH_TOKEN_TTL_DAYS * 86400,
+    );
 
     if (sendNotification) {
       const user = await this.prisma.user.findUnique({ where: { id: userId } });
@@ -138,15 +149,38 @@ export class AuthService {
   // ── Per-request identity ──────────────────────────────────────────────────────
 
   /**
-   * Resolves the caller. Short-lived access tokens are verified cryptographically
-   * and then checked against the session table so revoked sessions are rejected
-   * immediately (not just when the JWT expires).
+   * Resolves the caller.
+   * Hot path: Redis session cache → Redis user cache → zero DB hits.
+   * Cold path (cache miss): DB session → DB user → warm both caches.
+   * Revoked sessions are evicted from Redis immediately, so there is no
+   * grace window after revocation.
    */
   async resolve(req: Request): Promise<User> {
     const authHeader = req.headers['authorization'];
     if (authHeader?.startsWith('Bearer ')) {
       const payload = this.verifyAccessToken(authHeader.slice(7));
       if (payload) {
+        // ── Redis hot path ─────────────────────────────────────────────────────
+        const cachedUserId = await this.redis.getSession(payload.jti);
+        if (cachedUserId && cachedUserId === payload.sub) {
+          const cachedUser = await this.redis.getUser(cachedUserId);
+          if (cachedUser) return cachedUser;
+
+          // User cache miss — fetch from DB and re-warm
+          const user = await this.prisma.user.findUnique({
+            where: { id: cachedUserId },
+          });
+          if (user) {
+            void this.redis.setUser(user);
+            void this.prisma.session.update({
+              where: { id: payload.jti },
+              data: { lastUsedAt: new Date() },
+            });
+            return user;
+          }
+        }
+
+        // ── DB fallback (cold start / Redis miss) ──────────────────────────────
         const session = await this.prisma.session.findUnique({
           where: { id: payload.jti },
         });
@@ -159,6 +193,12 @@ export class AuthService {
             where: { id: payload.sub },
           });
           if (user) {
+            // Warm both caches
+            const remaining = Math.floor(
+              (session.expiresAt.getTime() - Date.now()) / 1000,
+            );
+            void this.redis.setSession(session.id, user.id, remaining);
+            void this.redis.setUser(user);
             void this.prisma.session.update({
               where: { id: session.id },
               data: { lastUsedAt: new Date() },
@@ -204,8 +244,10 @@ export class AuthService {
     });
 
     if (!session || session.expiresAt < new Date()) {
-      if (session)
+      if (session) {
         await this.prisma.session.delete({ where: { id: session.id } });
+        void this.redis.delSession(session.id, session.userId);
+      }
       throw new UnauthorizedException(
         'Refresh token expired. Please log in again.',
       );
@@ -216,10 +258,12 @@ export class AuthService {
     });
     if (!user) throw new UnauthorizedException('User not found.');
 
-    // Delete old session before creating new one (token rotation)
-    await this.prisma.session.delete({ where: { id: session.id } });
+    // Evict old session from Redis before rotating (prevents replay on cache hit)
+    await Promise.all([
+      this.prisma.session.delete({ where: { id: session.id } }),
+      this.redis.delSession(session.id, session.userId),
+    ]);
 
-    // Only send login notification on first login, not on routine refreshes
     const tokens = await this.issueTokenPair(user.id, ip, ua, false);
     return { tokens, user };
   }
@@ -241,13 +285,17 @@ export class AuthService {
   }
 
   async revokeSession(sessionId: string, userId: string): Promise<void> {
-    await this.prisma.session.deleteMany({
-      where: { id: sessionId, userId },
-    });
+    await Promise.all([
+      this.prisma.session.deleteMany({ where: { id: sessionId, userId } }),
+      this.redis.delSession(sessionId, userId),
+    ]);
   }
 
   async revokeAllSessions(userId: string): Promise<void> {
-    await this.prisma.session.deleteMany({ where: { userId } });
+    await Promise.all([
+      this.prisma.session.deleteMany({ where: { userId } }),
+      this.redis.delUserSessions(userId),
+    ]);
   }
 
   // ── Email sign-in ─────────────────────────────────────────────────────────────
