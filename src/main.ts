@@ -45,6 +45,14 @@ async function bootstrap(expressInstance: Express) {
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('docs', app, document, {
     swaggerOptions: { persistAuthorization: true },
+    // Serverless: swagger-ui-dist static assets aren't bundled by @vercel/node,
+    // so load the UI from a CDN instead of the function's filesystem.
+    customCssUrl:
+      'https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css',
+    customJs: [
+      'https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js',
+      'https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-standalone-preset.js',
+    ],
   });
 
   return app;
