@@ -5,11 +5,9 @@ import {
   type NestExpressApplication,
 } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
-import express, { type Express } from 'express';
+import express, { type Express, type Request, type Response } from 'express';
 import { AppModule } from './app.module';
 
-// Vercel imports this module and uses the default export (an Express app) as the
-// serverless handler. Locally we still call listen().
 const server = express();
 
 async function bootstrap(expressInstance: Express) {
@@ -52,12 +50,11 @@ async function bootstrap(expressInstance: Express) {
   return app;
 }
 
-if (process.env.VERCEL) {
-  // Serverless: just wire up routes onto `server`, no listen.
-  // ponytail: known cold-start race — a request landing before init() resolves
-  // 404s. Wrap with @codegenie/serverless-express (already a dep) if it bites.
-  void bootstrap(server).then((app) => app.init());
-} else {
+// Cache the init across warm invocations; first request awaits it so routes and
+// DI-provided guards (ThrottlerGuard's `throttlers`) are wired before we serve.
+let ready: Promise<unknown> | undefined;
+
+if (!process.env.VERCEL) {
   void bootstrap(server).then(async (app) => {
     const port = process.env.PORT ?? 3000;
     await app.listen(port);
@@ -66,4 +63,9 @@ if (process.env.VERCEL) {
   });
 }
 
-export default server;
+// Vercel's @vercel/node runtime calls this default export per request.
+export default async function handler(req: Request, res: Response) {
+  ready ??= bootstrap(server).then((app) => app.init());
+  await ready;
+  server(req, res);
+}
