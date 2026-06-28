@@ -11,72 +11,19 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
-import { IsEmail, IsString, Length, MinLength } from 'class-validator';
 import type { Request } from 'express';
 import { AuthService } from './auth.service';
 import { IdentityGuard } from './identity.guard';
 import type { AuthedRequest } from './identity.guard';
-
-// ── DTOs ──────────────────────────────────────────────────────────────────────
-
-class EmailPasswordDto {
-  @IsEmail()
-  email: string;
-
-  @IsString()
-  @MinLength(8)
-  password: string;
-}
-
-class RegisterDto {
-  @IsString()
-  @MinLength(1)
-  firstName!: string;
-
-  @IsEmail()
-  email: string;
-
-  @IsString()
-  @MinLength(8)
-  password: string;
-}
-
-class VerifyOtpDto {
-  @IsEmail()
-  email: string;
-
-  @IsString()
-  @Length(6, 6)
-  otp: string;
-}
-
-class EmailDto {
-  @IsEmail()
-  email: string;
-}
-
-class ResetPasswordDto {
-  @IsEmail()
-  email: string;
-
-  @IsString()
-  @Length(6, 6)
-  otp: string;
-
-  @IsString()
-  @MinLength(8)
-  newPassword!: string;
-}
-
-class GoogleTokenDto {
-  @IsString()
-  idToken: string;
-}
-
-class RefreshDto {
-  @IsString()
-  refreshToken!: string;
-}
+import {
+  EmailPasswordDto,
+  RegisterDto,
+  VerifyOtpDto,
+  EmailDto,
+  ResetPasswordDto,
+  GoogleTokenDto,
+  RefreshDto,
+} from './dto';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
