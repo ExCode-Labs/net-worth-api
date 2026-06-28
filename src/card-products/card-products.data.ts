@@ -2,13 +2,11 @@
  * Canonical card-product reference list. Single source of truth that seeds the
  * `CardProduct` table on boot (CardProductsService.onModuleInit); the app fetches
  * it via GET /card-products and offers it as a typeable dropdown in the Add Card
- * form (selecting one prefills issuer + network). Ids are derived from
- * issuer+name so the list stays easy to edit.
+ * form (selecting one prefills issuer + network). IDs are DB-generated cuids.
  */
 import { BANK_SEED } from '../banks/banks.data';
 
 export interface CardProductSeed {
-  id: string;
   name: string;
   issuer: string;
   bankCode?: string; // resolved Bank.code for the issuer (undefined if none)
@@ -16,13 +14,7 @@ export interface CardProductSeed {
   type: string; // Cashback | Travel | Premium | …
 }
 
-type Raw = Omit<CardProductSeed, 'id' | 'bankCode'>;
-
-const slug = (s: string) =>
-  s
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/(^-|-$)/g, '');
+type Raw = Omit<CardProductSeed, 'bankCode'>;
 
 // Resolve an issuer label to a Bank.code (exact name, then fuzzy). Labels that
 // aren't bank names get an explicit hint; fintechs with no single issuing bank
@@ -539,7 +531,6 @@ const RAW: Raw[] = [
 ];
 
 export const CARD_PRODUCT_SEED: CardProductSeed[] = RAW.map((c) => ({
-  id: slug(`${c.issuer}-${c.name}`),
   ...c,
   bankCode: bankCodeForIssuer(c.issuer),
 }));

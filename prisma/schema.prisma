@@ -1,8 +1,7 @@
 // NetWorth backend schema.
 // A User is identified by email+password (signed-in), Google OAuth, or device
-// guestKey (guest). All financial data is normalized per-entity and owned by a
-// User. Ids are supplied by the client so optimistic inserts use the same id
-// end-to-end.
+// deviceKey (guest). All financial data is normalized per-entity and owned by a
+// User. Financial entity ids are server-generated (cuid via @default).
 
 generator client {
   provider = "prisma-client-js"
@@ -15,8 +14,7 @@ datasource db {
 
 model User {
   id       String  @id @default(cuid())
-  clerkId  String? @unique // legacy — no longer populated for new users
-  guestKey String? @unique // guests (device key)
+  deviceKey String? @unique // guest identity / account-creation device
   googleId String? @unique // Google sub from ID token
 
   // Profile
@@ -34,9 +32,10 @@ model User {
   phoneHash String? @unique
 
   // App state
-  currency  String  @default("INR")
-  guestName String?
-  onboarded Boolean @default(false)
+  currency     String  @default("INR")
+  guestName    String?
+  onboarded    Boolean @default(false)
+  vaultPinHash String? // SHA-256(salt+pin) — gates the vault screen
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -47,8 +46,8 @@ model User {
   liabilities  Liability[]
   transactions Transaction[]
 
-  sharesOwned    Share[] @relation("ShareOwner")
-  sharesReceived Share[] @relation("ShareRecipient")
+  sharesOwned    Share[]   @relation("ShareOwner")
+  sharesReceived Share[]   @relation("ShareRecipient")
   sessions       Session[]
 }
 
@@ -61,7 +60,8 @@ model Session {
   refreshTokenHash String   @unique // SHA-256(rawRefreshToken) — never stores plaintext
   ipAddress        String?
   userAgent        String?
-  device           String?  // parsed: "Chrome on Windows"
+  device           String? // parsed: "Chrome on Windows"
+  location         String? // city, country — resolved async from IP on first login
   expiresAt        DateTime
   lastUsedAt       DateTime @default(now())
   createdAt        DateTime @default(now())
@@ -73,7 +73,7 @@ model Session {
 model OtpCode {
   id        String   @id @default(cuid())
   email     String
-  hash      String   // bcrypt hash of the 6-digit code
+  hash      String // bcrypt hash of the 6-digit code
   purpose   String   @default("login") // "login" | "reset" — prevents cross-flow OTP reuse
   expiresAt DateTime
   createdAt DateTime @default(now())
@@ -82,7 +82,7 @@ model OtpCode {
 }
 
 model Account {
-  id            String   @id
+  id            String   @id @default(cuid())
   userId        String
   user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   type          String
@@ -103,30 +103,33 @@ model Account {
 }
 
 model Card {
-  id         String   @id
+  id         String   @id @default(cuid())
   userId     String
   user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   cardName   String
   bank       String // display name + fuzzy-match fallback (free text / custom allowed)
   bankCode   String? // FK to Bank.code when the bank is a listed one (null for custom)
   bankRef    Bank?    @relation(fields: [bankCode], references: [code])
-  billCycle  String   @default("")
-  number     String? // full PAN (vault) — never the CVV
-  cardHolder String?
-  network    String?
-  last4      String   @default("")
-  expiry     String   @default("")
-  limit      Float    @default(0)
-  usage      Float    @default(0)
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  billCycle       String   @default("")
+  dueDate         String   @default("")
+  number          String? // full PAN (vault) — never the CVV
+  cardHolder      String?
+  network         String?
+  last4           String   @default("")
+  expiry          String   @default("")
+  limit           Float    @default(0)
+  usage           Float    @default(0)
+  type            String   @default("credit") // "credit" | "debit"
+  linkedAccountId String? // Account.id when type = "debit"
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   @@index([userId])
   @@index([bankCode])
 }
 
 model Asset {
-  id           String    @id
+  id           String    @id @default(cuid())
   userId       String
   user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   type         String
@@ -143,7 +146,7 @@ model Asset {
 }
 
 model Liability {
-  id           String    @id
+  id           String    @id @default(cuid())
   userId       String
   user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
   type         String
@@ -163,7 +166,7 @@ model Liability {
 }
 
 model Transaction {
-  id         String   @id
+  id         String   @id @default(cuid())
   userId     String
   user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   type       String
@@ -210,7 +213,7 @@ model Bank {
 // Powers the Add Card form's typeable dropdown (selecting one prefills bank +
 // network).
 model CardProduct {
-  id        String   @id // slug, e.g. "hdfc-bank-millennia-credit-card"
+  id        String   @id @default(cuid()) // slug, e.g. "hdfc-bank-millennia-credit-card"
   name      String
   issuer    String   @default("") // display label, e.g. "SBI Card" (may not be a bank name)
   bankCode  String? // FK to Bank.code resolved from the issuer (null if none)

@@ -14,10 +14,17 @@ import { CardProductsModule } from './card-products/card-products.module';
 @Module({
   imports: [
     ThrottlerModule.forRoot([
-      { name: 'default', ttl: 60_000, limit: 200 },
+      // Generic fallback — applies when no named throttler is specified.
+      { name: 'default', ttl: 60_000, limit: 120 },
+      // Auth flows — brute-force protection.
       { name: 'auth', ttl: 300_000, limit: 10 },
       { name: 'otp', ttl: 900_000, limit: 5 },
       { name: 'refresh', ttl: 60_000, limit: 30 },
+      // Data sync — POST/PATCH per-entity; client queues these 30 ms apart,
+      // but a large offline backlog can still send hundreds per minute.
+      { name: 'sync', ttl: 60_000, limit: 2000 },
+      // Expensive reads — bootstrap and vault are full-table queries; throttle tightly.
+      { name: 'heavy', ttl: 60_000, limit: 15 },
     ]),
     PrismaModule,
     AuthModule,

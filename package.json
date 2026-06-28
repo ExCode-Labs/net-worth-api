@@ -25,6 +25,7 @@
     "@nestjs/common": "^11.0.1",
     "@nestjs/core": "^11.0.1",
     "@nestjs/platform-express": "^11.0.1",
+    "@nestjs/swagger": "^11.4.4",
     "@nestjs/throttler": "^6.5.0",
     "@prisma/client": "^6.19.3",
     "@types/jsonwebtoken": "^9.0.10",

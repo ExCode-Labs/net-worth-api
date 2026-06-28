@@ -1,15 +1,19 @@
 import { Controller, Get } from '@nestjs/common';
+import { ApiOkResponse, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { BanksService } from './banks.service';
 
-/**
- * Public reference data — the bank list is not user-specific, so it needs no
- * identity guard. The app fetches it once and caches it locally.
- */
+@ApiTags('Reference')
 @Controller('banks')
 export class BanksController {
   constructor(private readonly banks: BanksService) {}
 
   @Get()
+  @ApiOperation({ summary: 'List all supported banks (public, no auth required)' })
+  @ApiOkResponse({
+    schema: {
+      example: [{ id: 'hdfc', code: 'HDFC', name: 'HDFC Bank', color: '#004C8F' }],
+    },
+  })
   findAll() {
     return this.banks.findAll();
   }

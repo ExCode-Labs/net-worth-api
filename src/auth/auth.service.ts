@@ -23,7 +23,7 @@ const REFRESH_TOKEN_BYTES = 64; // 128-char hex string
 const REFRESH_TOKEN_TTL_DAYS = 90;
 const REFRESH_TOKEN_DAYS_MS = REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60 * 1000;
 
-type OtpPurpose = 'login' | 'reset';
+type OtpPurpose = 'login' | 'reset' | 'vault-reset';
 
 interface AccessPayload {
   sub: string;
@@ -40,6 +40,7 @@ export interface SessionInfo {
   id: string;
   device: string | null;
   ipAddress: string | null;
+  location: string | null;
   createdAt: Date;
   lastUsedAt: Date;
   current: boolean;
@@ -142,6 +143,16 @@ export class AuthService {
           session.createdAt,
         );
       }
+      // Resolve city+country from IP asynchronously — never blocks the login response.
+      if (ip) {
+        void resolveLocation(ip).then((location) => {
+          if (location) {
+            return this.prisma.session
+              .update({ where: { id: session.id }, data: { location } })
+              .catch(() => undefined);
+          }
+        });
+      }
     }
 
     return {
@@ -218,12 +229,12 @@ export class AuthService {
       );
     }
 
-    const guestKey = (req.headers['x-guest-key'] as string | undefined)?.trim();
-    if (guestKey) {
+    const deviceKey = (req.headers['x-device-key'] as string | undefined)?.trim();
+    if (deviceKey) {
       return this.prisma.user.upsert({
-        where: { guestKey },
+        where: { deviceKey },
         update: {},
-        create: { guestKey, provider: 'guest' },
+        create: { deviceKey, provider: 'guest' },
       });
     }
 
@@ -288,6 +299,7 @@ export class AuthService {
       id: s.id,
       device: s.device,
       ipAddress: s.ipAddress,
+      location: s.location,
       createdAt: s.createdAt,
       lastUsedAt: s.lastUsedAt,
       current: s.id === currentSessionId,
@@ -338,6 +350,7 @@ export class AuthService {
     firstName: string,
     email: string,
     password: string,
+    deviceKey?: string,
   ): Promise<void> {
     const normalised = email.toLowerCase().trim();
     const existing = await this.prisma.user.findFirst({
@@ -352,16 +365,27 @@ export class AuthService {
     const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
     const name = firstName.trim();
     const parts = name.split(/\s+/);
-    await this.prisma.user.create({
-      data: {
-        email: normalised,
-        passwordHash,
-        firstName: parts[0] || null,
-        lastName: parts.slice(1).join(' ') || null,
-        fullName: name || null,
-        provider: 'email',
-      },
-    });
+    const base = {
+      email: normalised,
+      passwordHash,
+      firstName: parts[0] || null,
+      lastName: parts.slice(1).join(' ') || null,
+      fullName: name || null,
+      provider: 'email',
+    };
+
+    try {
+      await this.prisma.user.create({
+        data: { ...base, ...(deviceKey ? { deviceKey } : {}) },
+      });
+    } catch (e) {
+      // P2002: deviceKey already taken by another user (e.g. a guest on the same device).
+      if ((e as { code?: string }).code === 'P2002' && deviceKey) {
+        await this.prisma.user.create({ data: base });
+      } else {
+        throw e;
+      }
+    }
 
     await this.sendOtp(normalised, 'login');
   }
@@ -471,6 +495,7 @@ export class AuthService {
     idToken: string,
     ip: string | null,
     ua: string | null,
+    deviceKey?: string,
   ): Promise<{ tokens: TokenPair; user: User }> {
     const clientId = process.env.GOOGLE_CLIENT_ID;
     if (!clientId)
@@ -514,17 +539,27 @@ export class AuthService {
       const parts = (name ?? '').split(' ');
       const firstName = parts[0] || null;
       const lastName = parts.slice(1).join(' ') || null;
-      user = await this.prisma.user.create({
-        data: {
-          googleId,
-          email,
-          provider: 'google',
-          firstName,
-          lastName,
-          fullName: name,
-          avatarUrl: picture,
-        },
-      });
+      const base = {
+        googleId,
+        email,
+        provider: 'google',
+        firstName,
+        lastName,
+        fullName: name,
+        avatarUrl: picture,
+      };
+      try {
+        user = await this.prisma.user.create({
+          data: { ...base, ...(deviceKey ? { deviceKey } : {}) },
+        });
+      } catch (e) {
+        // P2002: deviceKey already taken (guest on same device).
+        if ((e as { code?: string }).code === 'P2002' && deviceKey) {
+          user = await this.prisma.user.create({ data: base });
+        } else {
+          throw e;
+        }
+      }
     }
 
     const tokens = await this.issueTokenPair(user.id, ip, ua);
@@ -546,7 +581,51 @@ export class AuthService {
       currency: user.currency,
       guestName: user.guestName,
       onboarded: user.onboarded,
+      hasVaultPin: !!user.vaultPinHash,
     };
+  }
+
+  // ── Vault PIN ─────────────────────────────────────────────────────────────────
+
+  /** Store a new vault PIN hash (client-hashed SHA-256). */
+  async setupVaultPin(userId: string, pinHash: string): Promise<void> {
+    await this.prisma.user.update({ where: { id: userId }, data: { vaultPinHash: pinHash } });
+    void this.redis.delUser(userId);
+  }
+
+  /** Returns true when the submitted hash matches the stored one. */
+  async verifyVaultPin(userId: string, pinHash: string): Promise<boolean> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { vaultPinHash: true },
+    });
+    return !!user?.vaultPinHash && user.vaultPinHash === pinHash;
+  }
+
+  /** Send a vault-reset OTP to the user's registered email. */
+  async requestVaultPinReset(userId: string): Promise<void> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
+    if (!user?.email) throw new BadRequestException('No email on this account to send a reset code to.');
+    await this.sendOtp(user.email, 'vault-reset');
+  }
+
+  /** Verify vault-reset OTP then replace the PIN hash. */
+  async resetVaultPin(userId: string, otp: string, pinHash: string): Promise<void> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId }, select: { email: true } });
+    if (!user?.email) throw new BadRequestException('No email on this account.');
+
+    const email = user.email;
+    const record = await this.prisma.otpCode.findFirst({
+      where: { email, purpose: 'vault-reset', expiresAt: { gt: new Date() } },
+      orderBy: { createdAt: 'desc' },
+    });
+    if (!record) throw new UnauthorizedException('Code expired or not found. Request a new one.');
+    const valid = await bcrypt.compare(otp.trim(), record.hash);
+    if (!valid) throw new UnauthorizedException('Incorrect code. Try again.');
+
+    await this.prisma.otpCode.deleteMany({ where: { email, purpose: 'vault-reset' } });
+    await this.prisma.user.update({ where: { id: userId }, data: { vaultPinHash: pinHash } });
+    void this.redis.delUser(userId);
   }
 
   // ── Internal helpers ──────────────────────────────────────────────────────────
@@ -567,17 +646,24 @@ export class AuthService {
     // already persisted above, so it's safe to fire-and-forget; the client shows
     // "code sent" immediately and can use "Resend" if delivery ever fails.
     const isReset = purpose === 'reset';
+    const isVaultReset = purpose === 'vault-reset';
+    const subject = isReset
+      ? `Reset your NetWorth password: ${code}`
+      : isVaultReset
+      ? `Reset your NetWorth vault PIN: ${code}`
+      : `Your NetWorth verification code: ${code}`;
+    const text = isReset
+      ? `Your password reset code is ${code}. It expires in 10 minutes. If you did not request this, ignore this email.`
+      : isVaultReset
+      ? `Your vault PIN reset code is ${code}. It expires in 10 minutes. If you did not request this, ignore this email.`
+      : `Your verification code is ${code}. It expires in 10 minutes.`;
     void this.mailer
       .sendMail({
         from: `"NetWorth" <${process.env.SMTP_USER}>`,
         to: email,
-        subject: isReset
-          ? `Reset your NetWorth password: ${code}`
-          : `Your NetWorth verification code: ${code}`,
-        text: isReset
-          ? `Your password reset code is ${code}. It expires in 10 minutes. If you did not request this, ignore this email.`
-          : `Your verification code is ${code}. It expires in 10 minutes.`,
-        html: otpEmailHtml(code, isReset),
+        subject,
+        text,
+        html: otpEmailHtml(code, isReset || isVaultReset),
       })
       .catch((e: unknown) => {
         this.log.warn(
@@ -608,10 +694,37 @@ export class AuthService {
 // ── Pure helpers ───────────────────────────────────────────────────────────────
 
 function parseDevice(ua: string): string {
-  const parser = new UAParser(ua);
-  const browser = parser.getBrowser().name ?? 'Unknown Browser';
-  const os = parser.getOS().name ?? 'Unknown OS';
-  return `${browser} on ${os}`;
+  if (ua.startsWith('Mozilla/')) {
+    // Standard browser User-Agent — run through the parser.
+    const parser = new UAParser(ua);
+    const browser = parser.getBrowser().name ?? 'Unknown Browser';
+    const os = parser.getOS().name ?? 'Unknown OS';
+    return `${browser} on ${os}`;
+  }
+  // Raw axios default UA ("axios/1.x") with no device info.
+  if (ua.startsWith('axios/')) return 'NetWorth App';
+  // Already a formatted device string from X-Device-Model ("Pixel 7a (Android 14)").
+  return ua;
+}
+
+/** Resolve an IP address to "City, Country" using ip-api.com (fire-and-forget only). */
+async function resolveLocation(ip: string): Promise<string | null> {
+  // Skip RFC-1918 / loopback ranges — they won't resolve to a real place.
+  if (/^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(ip) || ip === '::1') {
+    return null;
+  }
+  try {
+    const res = await fetch(
+      `http://ip-api.com/json/${encodeURIComponent(ip)}?fields=status,city,country`,
+      { signal: AbortSignal.timeout(3000) },
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as { status: string; city?: string; country?: string };
+    if (data.status !== 'success' || !data.country) return null;
+    return data.city ? `${data.city}, ${data.country}` : data.country;
+  } catch {
+    return null;
+  }
 }
 
 function otpEmailHtml(code: string, isReset: boolean): string {

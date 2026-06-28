@@ -36,6 +36,7 @@ async function withDbRetry<T>(fn: () => Promise<T>, tries = 3): Promise<T> {
  * be typed instead of `any`, so calls below aren't "unsafe any".
  */
 interface ModelDelegate {
+  create(args: { data: Record<string, unknown> }): Promise<{ id: string }>;
   upsert(args: {
     where: Record<string, unknown>;
     create: Record<string, unknown>;
@@ -79,6 +80,7 @@ const RESOURCES: Record<string, ResourceSpec> = {
       'bank',
       'bankCode',
       'billCycle',
+      'dueDate',
       'number',
       'cardHolder',
       'network',
@@ -86,6 +88,8 @@ const RESOURCES: Record<string, ResourceSpec> = {
       'expiry',
       'limit',
       'usage',
+      'type',
+      'linkedAccountId',
     ],
     dates: [],
   },
@@ -169,16 +173,21 @@ export class DataService {
   create(
     userId: string,
     resource: string,
-    id: string,
     data: Record<string, unknown>,
+    id?: string,
   ) {
     const spec = this.spec(resource);
     const clean = this.sanitize(spec, data);
-    return this.delegate(spec.model).upsert({
-      where: { id },
-      create: { ...clean, id, userId },
-      update: clean,
-    });
+    if (id) {
+      // Client-supplied id (e.g. notification transactions) — idempotent upsert.
+      return this.delegate(spec.model).upsert({
+        where: { id },
+        create: { ...clean, id, userId },
+        update: clean,
+      });
+    }
+    // No id supplied — let the DB generate one via @default(cuid()).
+    return this.delegate(spec.model).create({ data: { ...clean, userId } });
   }
 
   async update(
@@ -204,7 +213,10 @@ export class DataService {
     return { count: res.count };
   }
 
-  /** Everything the client needs at login, in one round-trip. */
+  /** Everything the client needs at login, in one round-trip.
+   *  Sensitive fields (card number/holder, account number/IFSC/branch) are
+   *  stripped here — clients fetch them explicitly from GET /vault after vault
+   *  PIN authentication. */
   async bootstrap(user: User) {
     const [accounts, cards, assets, liabilities, transactions] =
       await withDbRetry(() =>
@@ -221,12 +233,34 @@ export class DataService {
       );
     return {
       me: this.me(user),
-      accounts,
-      cards,
+      // Strip account-number / IFSC / branch — vault-only sensitive fields.
+      accounts: accounts.map(({ accountNumber, ifsc, branch, ...safe }) => safe),
+      // Strip full PAN and card holder — vault-only sensitive fields.
+      cards: cards.map(({ number, cardHolder, ...safe }) => ({
+        ...safe,
+        // Cast for new fields not yet in Prisma client (pending prisma generate)
+        type: (safe as unknown as Record<string, unknown>)['type'] ?? 'credit',
+        linkedAccountId: (safe as unknown as Record<string, unknown>)['linkedAccountId'] ?? null,
+      })),
       assets,
       liabilities,
       transactions,
     };
+  }
+
+  /** Sensitive fields for cards and accounts — only served after vault PIN auth. */
+  async vaultData(userId: string) {
+    const [cards, accounts] = await Promise.all([
+      this.prisma.card.findMany({
+        where: { userId },
+        select: { id: true, number: true, cardHolder: true },
+      }),
+      this.prisma.account.findMany({
+        where: { userId },
+        select: { id: true, accountNumber: true, ifsc: true, branch: true },
+      }),
+    ]);
+    return { cards, accounts };
   }
 
   me(user: User) {
@@ -242,6 +276,7 @@ export class DataService {
       currency: user.currency,
       guestName: user.guestName,
       onboarded: user.onboarded,
+      hasVaultPin: !!(user as unknown as Record<string, unknown>)['vaultPinHash'],
     };
   }
 

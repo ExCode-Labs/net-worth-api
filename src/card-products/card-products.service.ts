@@ -16,21 +16,10 @@ export class CardProductsService implements OnModuleInit {
 
   async onModuleInit() {
     try {
-      await this.prisma.$transaction(
-        CARD_PRODUCT_SEED.map((c) =>
-          this.prisma.cardProduct.upsert({
-            where: { id: c.id },
-            create: c,
-            update: {
-              name: c.name,
-              issuer: c.issuer,
-              bankCode: c.bankCode ?? null,
-              network: c.network,
-              type: c.type,
-            },
-          }),
-        ),
-      );
+      await this.prisma.$transaction([
+        this.prisma.cardProduct.deleteMany({}),
+        this.prisma.cardProduct.createMany({ data: CARD_PRODUCT_SEED }),
+      ]);
       this.logger.log(`Seeded ${CARD_PRODUCT_SEED.length} card products.`);
     } catch (err) {
       // Don't block startup if the DB is unreachable — the app ships a bundled
